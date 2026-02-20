@@ -1,0 +1,36 @@
+# Build artifacts
+*.o
+*.so
+*.bc
+
+# PostgreSQL regression test output
+results/
+regression.diffs
+regression.out
+tmp_check/
+log/
+
+# Editor files
+*.swp
+*~
+.vscode/
+.idea/
+
+# Book research artifacts
+book/.research/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Benchmarks (research scripts, not part of the extension)
+bench/
+
+# internal
+.claude/
+book/
+docs/

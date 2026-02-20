@@ -1,0 +1,4 @@
+comment = 'Korean full-text search using Kiwi morphological analyzer'
+default_version = '1.0'
+module_pathname = '$libdir/pg_kiwi'
+relocatable = false

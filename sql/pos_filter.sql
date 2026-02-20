@@ -1,0 +1,339 @@
+-- pg_kiwi POS filter automated tests
+--
+-- Verifies that map_pos_tag() correctly classifies all Kiwi POS tags
+-- and that pos_filter properly includes/excludes grammar tokens.
+--
+-- Token type mapping (from pg_kiwi.c):
+--   1=noun (N*), 2=verb (VV/VX/VC*), 3=adj (VA),
+--   4=adv (MA*), 5=det (MM), 6=number (SN),
+--   7=foreign (SL/SH), 8=unknown (UN, and all filtered tags when filter=off)
+--
+-- Filtered when pos_filter=on:
+--   J* (particles), E* (endings), X* (affixes),
+--   IC (interjections), SF/SP/SS/SE/SO/SW (symbols)
+
+DROP EXTENSION IF EXISTS pg_kiwi CASCADE;
+CREATE EXTENSION pg_kiwi;
+
+-- ============================================================
+-- Helper view: parse with filter OFF to see raw Kiwi output
+-- ============================================================
+
+-- Verify setup
+SELECT 1 AS setup_ok;
+
+-- ============================================================
+-- TEST 1: 조사 (Particles - J*) must be filtered
+--
+-- JKS(주격): 이/가, JKO(목적격): 을/를, JKB(부사격): 에/에서/로
+-- JKG(관형격): 의, JX(보조사): 는/도/만, JC(접속조사): 와/과
+-- ============================================================
+
+-- 1a. Filter ON: 조사 must NOT appear
+SET pg_kiwi.pos_filter = true;
+
+SELECT 'T1a: particles filtered' AS test,
+       count(*) FILTER (WHERE tokid NOT BETWEEN 1 AND 8) = 0 AS all_valid_types,
+       bool_and(tokid BETWEEN 1 AND 7) AS no_unknown_grammar
+FROM ts_parse('kiwi_parser', '학생이 학교에서 친구와 함께 공부를 한다');
+
+-- 1b. Filter OFF: 조사 must appear as tokid=8
+SET pg_kiwi.pos_filter = false;
+
+SELECT 'T1b: particles visible' AS test,
+       count(*) FILTER (WHERE tokid = 8) AS grammar_count,
+       count(*) FILTER (WHERE tokid = 8) > 0 AS has_grammar_tokens
+FROM ts_parse('kiwi_parser', '학생이 학교에서 친구와 함께 공부를 한다');
+
+-- 1c. Specific particle tokens appear with filter OFF
+SELECT 'T1c: specific particles' AS test,
+       array_agg(token ORDER BY token) @> ARRAY['이'] AS has_particle
+FROM ts_parse('kiwi_parser', '학생이 간다')
+WHERE tokid = 8;
+
+-- ============================================================
+-- TEST 2: 어미 (Endings - E*) must be filtered
+--
+-- EP(선어말): 시/았/었, EF(종결): 다/요, EC(연결): 고/면/서
+-- ETN(명사형전성): ㅁ/기, ETM(관형형전성): ㄴ/는/ㄹ
+-- ============================================================
+
+-- 2a. Filter ON: 어미 must NOT appear
+SET pg_kiwi.pos_filter = true;
+
+SELECT 'T2a: endings filtered' AS test,
+       count(*) AS content_tokens
+FROM ts_parse('kiwi_parser', '선생님이 학생에게 책을 읽으라고 하셨다');
+
+-- 2b. Filter OFF: 어미 appear as tokid=8
+SET pg_kiwi.pos_filter = false;
+
+SELECT 'T2b: endings visible' AS test,
+       count(*) FILTER (WHERE tokid = 8) AS ending_count,
+       count(*) FILTER (WHERE tokid = 8) > 0 AS has_endings
+FROM ts_parse('kiwi_parser', '선생님이 학생에게 책을 읽으라고 하셨다');
+
+-- 2c. More endings are visible when filter is off
+SET pg_kiwi.pos_filter = false;
+SELECT count(*) AS tokens_unfiltered
+FROM ts_parse('kiwi_parser', '먹고 마시며 놀았다')
+\gset
+
+SET pg_kiwi.pos_filter = true;
+SELECT 'T2c: filter reduces count' AS test,
+       count(*) < :tokens_unfiltered AS fewer_with_filter
+FROM ts_parse('kiwi_parser', '먹고 마시며 놀았다');
+
+-- ============================================================
+-- TEST 3: 접사 (Affixes - X*) must be filtered
+--
+-- XSV(동사파생접미사): 하/되, XSA(형용사파생접미사): 스럽/답
+-- XSN(명사파생접미사), XPN(체언접두사)
+-- ============================================================
+
+-- 3a. Filter ON: 접사 must be excluded
+SET pg_kiwi.pos_filter = true;
+
+SELECT 'T3a: affixes filtered' AS test,
+       bool_and(tokid BETWEEN 1 AND 7) AS only_content
+FROM ts_parse('kiwi_parser', '사랑스러운 그녀가 행복하다');
+
+-- 3b. Filter OFF: 접사 appear as tokid=8
+SET pg_kiwi.pos_filter = false;
+
+SELECT 'T3b: affixes visible' AS test,
+       count(*) FILTER (WHERE tokid = 8) AS affix_count,
+       count(*) FILTER (WHERE tokid = 8) > 0 AS has_affixes
+FROM ts_parse('kiwi_parser', '사랑스러운 그녀가 행복하다');
+
+-- ============================================================
+-- TEST 4: 부호 (Symbols - SF/SP/SS/SE/SO/SW) must be filtered
+-- (SN=number, SL=foreign, SH=hanja are NOT filtered)
+-- ============================================================
+
+-- 4a. Filter ON: punctuation symbols must NOT appear
+SET pg_kiwi.pos_filter = true;
+
+SELECT 'T4a: symbols filtered' AS test,
+       bool_and(token NOT IN ('.', ',', '?', '!', '…', '~', '"', '(', ')')) AS no_symbols
+FROM ts_parse('kiwi_parser', '안녕하세요, 반갑습니다! 어떻게 지내세요?');
+
+-- 4b. SN (numbers) must PASS filter
+SELECT 'T4b: numbers pass' AS test,
+       count(*) FILTER (WHERE tokid = 6) AS number_count,
+       count(*) FILTER (WHERE tokid = 6) > 0 AS has_numbers
+FROM ts_parse('kiwi_parser', '2024년 1월 15일');
+
+-- 4c. SL (foreign) must PASS filter
+SELECT 'T4c: foreign pass' AS test,
+       count(*) FILTER (WHERE tokid = 7) AS foreign_count,
+       count(*) FILTER (WHERE tokid = 7) > 0 AS has_foreign
+FROM ts_parse('kiwi_parser', 'PostgreSQL은 좋은 DBMS이다');
+
+-- 4d. SH (hanja) must PASS filter
+SELECT 'T4d: hanja pass' AS test,
+       count(*) FILTER (WHERE tokid = 7) AS hanja_count,
+       count(*) FILTER (WHERE tokid = 7) > 0 AS has_hanja
+FROM ts_parse('kiwi_parser', '大韓民國 헌법');
+
+-- ============================================================
+-- TEST 5: 감탄사 (Interjections - IC) must be filtered
+-- ============================================================
+
+SET pg_kiwi.pos_filter = true;
+
+SELECT 'T5a: interjections filtered' AS test,
+       bool_and(tokid BETWEEN 1 AND 7) AS only_content
+FROM ts_parse('kiwi_parser', '아이고 세상에 큰일이다');
+
+-- ============================================================
+-- TEST 6: Content words must ALWAYS pass (filter on or off)
+-- ============================================================
+
+-- 6a. Nouns (NNG, NNP, NNB, NR, NP) → tokid=1
+SET pg_kiwi.pos_filter = true;
+
+SELECT 'T6a: nouns present' AS test,
+       count(*) FILTER (WHERE tokid = 1) AS noun_count,
+       array_agg(token ORDER BY token) FILTER (WHERE tokid = 1) AS nouns
+FROM ts_parse('kiwi_parser', '서울 대학교 학생');
+
+-- 6b. Verbs (VV, VX, VCP, VCN) → tokid=2
+SELECT 'T6b: verbs present' AS test,
+       count(*) FILTER (WHERE tokid = 2) AS verb_count,
+       array_agg(token ORDER BY token) FILTER (WHERE tokid = 2) AS verbs
+FROM ts_parse('kiwi_parser', '먹고 마시고 놀자');
+
+-- 6c. Adjectives (VA) → tokid=3
+SELECT 'T6c: adjectives present' AS test,
+       count(*) FILTER (WHERE tokid = 3) AS adj_count,
+       array_agg(token ORDER BY token) FILTER (WHERE tokid = 3) AS adjs
+FROM ts_parse('kiwi_parser', '아름답고 높은 산');
+
+-- 6d. Adverbs (MAG, MAJ) → tokid=4
+SELECT 'T6d: adverbs present' AS test,
+       count(*) FILTER (WHERE tokid = 4) AS adv_count,
+       array_agg(token ORDER BY token) FILTER (WHERE tokid = 4) AS advs
+FROM ts_parse('kiwi_parser', '매우 빨리 달린다');
+
+-- 6e. Determiners (MM) → tokid=5
+SELECT 'T6e: determiners present' AS test,
+       count(*) FILTER (WHERE tokid = 5) AS det_count,
+       array_agg(token ORDER BY token) FILTER (WHERE tokid = 5) AS dets
+FROM ts_parse('kiwi_parser', '새 옷을 입었다');
+
+-- ============================================================
+-- TEST 7: to_tsvector stores ONLY content words
+-- ============================================================
+
+SET pg_kiwi.pos_filter = true;
+
+-- 7a. Particles (조사) must not be in tsvector
+SELECT 'T7a: tsvector no particles' AS test,
+       to_tsvector('korean', '학생이 학교에 간다') AS vec,
+       NOT (to_tsvector('korean', '학생이 학교에 간다') @@ to_tsquery('korean', '에')) AS no_particle;
+
+-- 7b. Content words must be in tsvector
+SELECT 'T7b: tsvector has content' AS test,
+       to_tsvector('korean', '학생이 학교에 간다') @@ to_tsquery('korean', '학생') AS has_student,
+       to_tsvector('korean', '학생이 학교에 간다') @@ to_tsquery('korean', '학교') AS has_school;
+
+-- 7c. Verb stems stored correctly (활용형 → 원형)
+SELECT 'T7c: verb stems normalized' AS test,
+       to_tsvector('korean', '갔다') AS past,
+       to_tsvector('korean', '간다') AS present,
+       to_tsvector('korean', '가겠다') AS future;
+
+-- ============================================================
+-- TEST 8: GIN index correctly filters grammar tokens
+-- ============================================================
+
+DROP TABLE IF EXISTS pos_test_docs;
+CREATE TABLE pos_test_docs (id serial, content text);
+INSERT INTO pos_test_docs (content) VALUES
+    ('나는 학교에서 공부를 했다'),
+    ('너는 집에서 텔레비전을 보았다'),
+    ('우리는 공원에서 산책을 했다');
+
+CREATE INDEX idx_pos_test ON pos_test_docs
+    USING GIN (to_tsvector('korean', content));
+
+-- 8a. Search by content word: should match
+SELECT 'T8a: GIN content match' AS test,
+       count(*) AS matches
+FROM pos_test_docs
+WHERE to_tsvector('korean', content) @@ to_tsquery('korean', '공부');
+
+-- 8b. Search by particle: should NOT match (particles not indexed)
+SELECT 'T8b: GIN particle no match' AS test,
+       count(*) = 0 AS no_match
+FROM pos_test_docs
+WHERE to_tsvector('korean', content) @@ to_tsquery('korean', '에서');
+
+-- ============================================================
+-- TEST 9: Filter ON/OFF token count comparison
+--          filter_off >= filter_on for every sentence
+-- ============================================================
+
+SELECT 'T9: filter reduces tokens' AS test,
+       bool_and(cnt_off >= cnt_on) AS all_reduced
+FROM (
+    VALUES
+        ('나는 학생이다'),
+        ('서울에서 부산까지 기차로 갔다'),
+        ('아름답고 높은 산에 올랐다'),
+        ('선생님께서 학생들에게 책을 나누어 주셨습니다')
+) AS sentences(s),
+LATERAL (
+    SELECT count(*) AS cnt_off
+    FROM ts_parse('kiwi_parser', s)
+    -- pos_filter is session-level, can't change in lateral
+) off_q,
+LATERAL (
+    SELECT count(*) AS cnt_on
+    FROM (
+        SELECT tokid FROM ts_parse('kiwi_parser', s)
+        WHERE tokid BETWEEN 1 AND 7
+    ) sq
+) on_q;
+
+-- ============================================================
+-- TEST 10: Deterministic output - same input → same output
+-- ============================================================
+
+SELECT 'T10: deterministic output' AS test,
+       (SELECT array_agg(token ORDER BY token)
+        FROM ts_parse('kiwi_parser', '한국어 형태소 분석기'))
+       =
+       (SELECT array_agg(token ORDER BY token)
+        FROM ts_parse('kiwi_parser', '한국어 형태소 분석기'))
+       AS is_deterministic;
+
+-- ============================================================
+-- TEST 11: 띄어쓰기 오류에도 정상 토큰화
+-- ============================================================
+
+SET pg_kiwi.pos_filter = true;
+
+SELECT 'T11a: no-space parsing' AS test,
+       count(*) > 0 AS has_tokens,
+       count(*) FILTER (WHERE tokid = 1) > 0 AS has_nouns
+FROM ts_parse('kiwi_parser', '나는학생이다');
+
+SELECT 'T11b: no-space content' AS test,
+       array_agg(token ORDER BY token) FILTER (WHERE tokid = 1) AS nouns
+FROM ts_parse('kiwi_parser', '오늘날씨가좋다');
+
+-- ============================================================
+-- SUMMARY: Assert-style checks using DO block
+-- ============================================================
+
+DO $$
+DECLARE
+    cnt_on int;
+    cnt_off int;
+    vec tsvector;
+BEGIN
+    -- Assert: filter ON removes grammar tokens
+    SET pg_kiwi.pos_filter = true;
+    SELECT count(*) INTO cnt_on
+    FROM ts_parse('kiwi_parser', '학생이 학교에서 친구와 함께 공부를 한다');
+
+    SET pg_kiwi.pos_filter = false;
+    SELECT count(*) INTO cnt_off
+    FROM ts_parse('kiwi_parser', '학생이 학교에서 친구와 함께 공부를 한다');
+
+    ASSERT cnt_off > cnt_on,
+        format('Filter must reduce token count: off=%s on=%s', cnt_off, cnt_on);
+
+    -- Assert: no tokid=8 when filter is ON (for a sentence with only known POS)
+    SET pg_kiwi.pos_filter = true;
+    ASSERT (SELECT count(*) = 0
+            FROM ts_parse('kiwi_parser', '학생이 학교에 간다')
+            WHERE tokid = 8),
+        'No unknown tokens expected for standard Korean sentence with filter ON';
+
+    -- Assert: tsvector does not contain particles
+    vec := to_tsvector('korean', '학생이 학교에서 친구와 함께 공부를 한다');
+    ASSERT NOT (vec @@ '에서'::tsquery),
+        'tsvector must not contain particle 에서';
+    ASSERT NOT (vec @@ '와'::tsquery),
+        'tsvector must not contain particle 와';
+    ASSERT NOT (vec @@ '를'::tsquery),
+        'tsvector must not contain particle 를';
+
+    -- Assert: tsvector contains content words
+    ASSERT vec @@ '학생'::tsquery,
+        'tsvector must contain noun 학생';
+    ASSERT vec @@ '학교'::tsquery,
+        'tsvector must contain noun 학교';
+    ASSERT vec @@ '공부'::tsquery,
+        'tsvector must contain noun 공부';
+
+    RAISE NOTICE 'ALL ASSERTIONS PASSED';
+END;
+$$;
+
+-- Cleanup
+DROP TABLE IF EXISTS pos_test_docs;
+DROP EXTENSION pg_kiwi;

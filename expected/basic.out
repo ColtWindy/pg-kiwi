@@ -1,0 +1,99 @@
+-- pg_kiwi regression tests
+-- Install extension
+DROP EXTENSION IF EXISTS pg_kiwi CASCADE;
+NOTICE:  extension "pg_kiwi" does not exist, skipping
+CREATE EXTENSION pg_kiwi;
+-- Verify GUC variables
+SHOW pg_kiwi.model_path;
+              pg_kiwi.model_path              
+----------------------------------------------
+ /usr/local/share/kiwi_model/models/cong/base
+(1 row)
+
+SHOW pg_kiwi.pos_filter;
+ pg_kiwi.pos_filter 
+--------------------
+ on
+(1 row)
+
+-- Test lextype: list supported token types
+SELECT * FROM ts_token_type('kiwi_parser');
+ tokid |  alias  |         description          
+-------+---------+------------------------------
+     1 | noun    | Noun (NNG, NNP, NNB, NR, NP)
+     2 | verb    | Verb (VV, VX, VCP, VCN)
+     3 | adj     | Adjective (VA)
+     4 | adv     | Adverb (MAG, MAJ)
+     5 | det     | Determiner (MM)
+     6 | number  | Number (SN)
+     7 | foreign | Foreign/Hanja (SL, SH)
+     8 | unknown | Unknown (UN)
+(8 rows)
+
+-- Test basic parsing (HANDOFF verification case)
+SELECT * FROM ts_parse('kiwi_parser', '경주 불국사는 신라 시대에 건축된 사찰이다');
+ tokid | token  
+-------+--------
+     1 | 경주
+     1 | 불국사
+     1 | 신라
+     1 | 시대
+     1 | 건축
+     1 | 사찰
+     2 | 이
+(7 rows)
+
+-- Test to_tsvector (HANDOFF case: 등산로이다)
+SELECT to_tsvector('korean', '등산로이다');
+    to_tsvector    
+-------------------
+ '등산로':1 '이':2
+(1 row)
+
+-- Test to_tsquery
+SELECT to_tsquery('korean', '등산');
+ to_tsquery 
+------------
+ '등산'
+(1 row)
+
+-- Test search matching: 불국사
+SELECT to_tsvector('korean', '경주의 불국사는 신라 시대에 건축된 사찰이다')
+    @@ to_tsquery('korean', '불국사');
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Test search matching: 통일신라 (HANDOFF verification case)
+SELECT to_tsvector('korean', '통일신라시대')
+    @@ to_tsquery('korean', '통일신라');
+ ?column? 
+----------
+ t
+(1 row)
+
+-- Test POS filter off: should include particles and endings
+SET pg_kiwi.pos_filter = false;
+SELECT * FROM ts_parse('kiwi_parser', '나는 학생이다');
+ tokid | token 
+-------+-------
+     1 | 나
+     8 | 는
+     1 | 학생
+     2 | 이
+     8 | 다
+(5 rows)
+
+-- Test POS filter on: should exclude particles and endings
+SET pg_kiwi.pos_filter = true;
+SELECT * FROM ts_parse('kiwi_parser', '나는 학생이다');
+ tokid | token 
+-------+-------
+     1 | 나
+     1 | 학생
+     2 | 이
+(3 rows)
+
+-- Cleanup
+DROP EXTENSION pg_kiwi;

@@ -1,0 +1,323 @@
+-- pg_kiwi BM25 ranking tests (via pg_textsearch)
+--
+-- Tests REAL BM25 ranking, not PostgreSQL's built-in ts_rank (TF-IDF variant).
+-- BM25 differs from ts_rank in three critical ways:
+--   1. IDF (Inverse Document Frequency): rare terms score higher
+--   2. Document length normalization: shorter docs preferred
+--   3. TF saturation: diminishing returns for repeated terms
+--
+-- Usage pattern:
+--   Boolean filter:  WHERE to_tsvector('korean', body) @@ to_tsquery('korean', 'term')
+--   BM25 ranking:    ORDER BY body <@> 'term'   (lower = better match)
+--   Combined:        filter with @@ then rank with <@>
+--
+-- Requires: pg_textsearch (Timescale)
+DROP EXTENSION IF EXISTS pg_kiwi CASCADE;
+NOTICE:  extension "pg_kiwi" does not exist, skipping
+DROP EXTENSION IF EXISTS pg_textsearch CASCADE;
+NOTICE:  extension "pg_textsearch" does not exist, skipping
+CREATE EXTENSION pg_kiwi;
+CREATE EXTENSION pg_textsearch;
+WARNING:  pg_textsearch v0.5.1 is a prerelease. Do not use in production.
+SET pg_kiwi.pos_filter = true;
+-- ============================================================
+-- Setup: document collection designed for BM25 testing
+--
+-- Documents vary in:
+--   - length (short vs long)
+--   - term frequency (single vs repeated mentions)
+--   - term rarity (common vs rare terms)
+-- ============================================================
+DROP TABLE IF EXISTS docs;
+NOTICE:  table "docs" does not exist, skipping
+CREATE TABLE docs (
+    id serial PRIMARY KEY,
+    body text NOT NULL
+);
+INSERT INTO docs (id, body) VALUES
+    -- Short docs (test length normalization)
+    (1, '경주 불국사'),
+    (2, '부산 해운대'),
+    -- Medium docs
+    (3, '경주의 불국사는 신라 시대에 건축된 사찰이다.'),
+    (4, '부산 해운대 해수욕장에서 수영을 했다. 광안리도 아름다웠다.'),
+    -- Long doc mentioning 경주 once (length normalization test)
+    (5, '한국의 관광지는 다양하다. 서울에는 경복궁과 남산타워가 있다. 부산에는 해운대와 광안리가 있다. 제주도에는 한라산과 성산일출봉이 있다. 경주에는 불국사와 석굴암이 있다. 전주에는 한옥마을이 있다. 강릉에는 경포대가 있다.'),
+    -- Doc with high TF for 형태소 (TF saturation test)
+    (6, '형태소 분석은 중요하다. 형태소를 잘 분석해야 검색이 된다. 형태소 분석기 중에서 Kiwi가 좋다. 형태소 단위로 색인하면 검색 품질이 올라간다.'),
+    -- Doc with single mention of 형태소
+    (7, '한국어 검색을 위해서는 형태소 분석이 필수적이다.'),
+    -- Rare term doc (IDF test)
+    (8, '양자컴퓨터는 큐비트를 사용하여 병렬 계산을 수행한다.');
+-- Create BM25 index using Korean text config
+CREATE INDEX idx_docs_bm25 ON docs USING bm25(body)
+    WITH (text_config = 'public.korean');
+NOTICE:  BM25 index build started for relation idx_docs_bm25
+NOTICE:  Using text search configuration: public.korean
+NOTICE:  Using index options: k1=1.20, b=0.75
+NOTICE:  BM25 index build completed: 8 documents, avg_length=9.75, text_config='public.korean' (k1=1.20, b=0.75)
+-- ============================================================
+-- TEST 1: BM25 인덱스 기본 동작 (BM25 index basics)
+-- ============================================================
+-- 1a. BM25 top-K retrieval (the standard BM25 usage pattern)
+SELECT 'T1a: bm25 top-k retrieval' AS test, id,
+       body <@> '불국사' AS bm25_score
+FROM docs
+ORDER BY body <@> '불국사'
+LIMIT 3;
+           test            | id |     bm25_score      
+---------------------------+----+---------------------
+ T1a: bm25 top-k retrieval |  1 | -1.3995648622512817
+ T1a: bm25 top-k retrieval |  3 | -1.0676522254943848
+ T1a: bm25 top-k retrieval |  5 | -0.5479026436805725
+(3 rows)
+
+-- 1b. Boolean filter + BM25 ranking (combined pattern)
+SELECT 'T1b: filter + bm25 rank' AS test, id,
+       body <@> '불국사' AS bm25_score
+FROM docs
+WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '불국사')
+ORDER BY body <@> '불국사';
+          test           | id |     bm25_score      
+-------------------------+----+---------------------
+ T1b: filter + bm25 rank |  1 | -1.3995648622512817
+ T1b: filter + bm25 rank |  3 | -1.0676522254943848
+ T1b: filter + bm25 rank |  5 | -0.5479026436805725
+(3 rows)
+
+-- ============================================================
+-- TEST 2: IDF — 희귀 용어가 높은 점수 (Rare terms score higher)
+--
+-- "양자컴퓨터" appears in 1/8 docs → high IDF
+-- "경주" appears in 3/8 docs → lower IDF
+-- BM25 IDF: log((N - n + 0.5) / (n + 0.5))
+-- <@> returns negative distance: lower = better match.
+-- ============================================================
+-- Compare best BM25 scores (most negative = best match)
+SELECT 'T2: IDF comparison' AS test,
+       (SELECT body <@> '양자컴퓨터' FROM docs
+        WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '양자컴퓨터')
+        ORDER BY body <@> '양자컴퓨터' LIMIT 1) AS rare_term_score,
+       (SELECT body <@> '경주' FROM docs
+        WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '경주')
+        ORDER BY body <@> '경주' LIMIT 1) AS common_term_score;
+        test        |  rare_term_score   |  common_term_score  
+--------------------+--------------------+---------------------
+ T2: IDF comparison | -4.050934314727783 | -1.3995648622512817
+(1 row)
+
+-- ============================================================
+-- TEST 3: 문서 길이 정규화 (Document length normalization)
+--
+-- Short doc "경주 불국사" (id=1) vs long doc mentioning 경주 (id=5).
+-- BM25 with b=0.75 penalizes longer documents.
+-- Both docs mention 경주 once, but id=1 is 6 chars vs id=5 is 123 chars.
+-- ============================================================
+SELECT 'T3: length normalization' AS test, id,
+       body <@> '경주' AS bm25_score,
+       length(body) AS doc_length
+FROM docs
+WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '경주')
+ORDER BY body <@> '경주';
+           test           | id |     bm25_score      | doc_length 
+--------------------------+----+---------------------+------------
+ T3: length normalization |  1 | -1.3995648622512817 |          6
+ T3: length normalization |  3 | -1.0676522254943848 |         25
+ T3: length normalization |  5 | -0.5479026436805725 |        123
+(3 rows)
+
+-- ============================================================
+-- TEST 4: TF 포화 (Term frequency saturation)
+--
+-- Doc 6 mentions "형태소" 4 times, doc 7 mentions it 1 time.
+-- In BM25, TF = f / (f + k1 * (1 - b + b * dl/avgdl))
+-- Score should NOT scale linearly with TF (saturation effect).
+-- ============================================================
+SELECT 'T4: TF saturation' AS test, id,
+       body <@> '형태소' AS bm25_score
+FROM docs
+WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '형태소')
+ORDER BY body <@> '형태소';
+       test        | id |     bm25_score      
+-------------------+----+---------------------
+ T4: TF saturation |  6 | -1.8619928359985352
+ T4: TF saturation |  7 | -1.4480122327804565
+(2 rows)
+
+-- ============================================================
+-- TEST 5: 한국어 형태소 분석 + BM25 (Korean morphology + BM25)
+--
+-- The real value: Kiwi normalizes Korean, BM25 ranks properly.
+-- Boolean matching (@@) filters, BM25 (<@>) ranks.
+-- ============================================================
+-- 5a. Agglutination: 경주에는/경주의 in docs match 경주 query
+SELECT 'T5a: agglutination + bm25' AS test, id,
+       body <@> '경주' AS bm25_score
+FROM docs
+WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '경주')
+ORDER BY body <@> '경주';
+           test            | id |     bm25_score      
+---------------------------+----+---------------------
+ T5a: agglutination + bm25 |  1 | -1.3995648622512817
+ T5a: agglutination + bm25 |  3 | -1.0676522254943848
+ T5a: agglutination + bm25 |  5 | -0.5479026436805725
+(3 rows)
+
+-- 5b. Verb lemmatization: 건축된 in doc matches 건축 query
+SELECT 'T5b: lemma + bm25' AS test, id
+FROM docs
+WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '건축')
+ORDER BY body <@> '건축';
+       test        | id 
+-------------------+----
+ T5b: lemma + bm25 |  3
+(1 row)
+
+-- 5c. Adjective lemmatization: 아름다웠다 matches 아름답
+SELECT 'T5c: adj lemma + bm25' AS test, id
+FROM docs
+WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '아름답')
+ORDER BY body <@> '아름답';
+         test          | id 
+-----------------------+----
+ T5c: adj lemma + bm25 |  4
+(1 row)
+
+-- ============================================================
+-- TEST 6: BM25 vs ts_rank 비교 (BM25 vs ts_rank comparison)
+--
+-- ts_rank gives IDENTICAL scores when term frequency is same.
+-- BM25 differentiates by document length.
+-- This is THE key difference for Korean search quality.
+-- ============================================================
+SELECT 'T6: bm25 vs ts_rank' AS test, id,
+       body <@> '경주' AS bm25_score,
+       ts_rank(to_tsvector('korean', body), to_tsquery('korean', '경주')) AS tsrank_score,
+       length(body) AS doc_length
+FROM docs
+WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '경주')
+ORDER BY body <@> '경주';
+        test         | id |     bm25_score      | tsrank_score | doc_length 
+---------------------+----+---------------------+--------------+------------
+ T6: bm25 vs ts_rank |  1 | -1.3995648622512817 |   0.06079271 |          6
+ T6: bm25 vs ts_rank |  3 | -1.0676522254943848 |   0.06079271 |         25
+ T6: bm25 vs ts_rank |  5 | -0.5479026436805725 |   0.06079271 |        123
+(3 rows)
+
+-- ============================================================
+-- TEST 7: 복합 쿼리 BM25 (Multi-term BM25 queries)
+-- ============================================================
+-- 7a. Two-term query: docs matching both terms rank highest
+SELECT 'T7a: two-term bm25' AS test, id,
+       body <@> '경주 불국사' AS bm25_score
+FROM docs
+WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '경주 & 불국사')
+ORDER BY body <@> '경주 불국사';
+        test        | id |     bm25_score      
+--------------------+----+---------------------
+ T7a: two-term bm25 |  1 | -2.7991297245025635
+ T7a: two-term bm25 |  3 | -2.1353044509887695
+ T7a: two-term bm25 |  5 |  -1.095805287361145
+(3 rows)
+
+-- 7b. English + Korean mixed query
+SELECT 'T7b: mixed lang bm25' AS test, id,
+       body <@> 'Kiwi 형태소' AS bm25_score
+FROM docs
+WHERE to_tsvector('korean', body) @@ to_tsquery('korean', 'Kiwi & 형태소')
+ORDER BY body <@> 'Kiwi 형태소';
+         test         | id |     bm25_score      
+----------------------+----+---------------------
+ T7b: mixed lang bm25 |  6 | -3.1527817249298096
+(1 row)
+
+-- ============================================================
+-- TEST 8: RAG 검색 패턴 (RAG retrieval pattern)
+--
+-- The actual use case: top-K retrieval for RAG pipeline.
+-- BM25 as first-stage retriever, results passed to LLM.
+-- ============================================================
+-- 8a. Top-3 retrieval by BM25 score (pure BM25, no boolean filter)
+SELECT 'T8a: rag top-3' AS test, id,
+       body <@> '한국 관광 여행' AS bm25_score
+FROM docs
+ORDER BY body <@> '한국 관광 여행'
+LIMIT 3;
+      test      | id |     bm25_score      
+----------------+----+---------------------
+ T8a: rag top-3 |  5 | -1.0394386053085327
+(1 row)
+
+-- 8b. BM25 index metadata verification
+SELECT 'T8b: bm25 index metadata' AS test,
+       indexname, indexdef LIKE '%bm25%' AS is_bm25
+FROM pg_indexes
+WHERE tablename = 'docs' AND indexname = 'idx_docs_bm25';
+           test           |   indexname   | is_bm25 
+--------------------------+---------------+---------
+ T8b: bm25 index metadata | idx_docs_bm25 | t
+(1 row)
+
+-- ============================================================
+-- ASSERTIONS
+-- ============================================================
+DO $$
+DECLARE
+    score_rare float;
+    score_common float;
+    score_short float;
+    score_long float;
+    cnt_bm25_distinct int;
+    cnt_tsrank_distinct int;
+BEGIN
+    SET pg_kiwi.pos_filter = true;
+
+    -- Assert: BM25 search returns results for 불국사
+    PERFORM id FROM docs
+    WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '불국사');
+    ASSERT FOUND, 'BM25 search must return results for 불국사';
+
+    -- Assert: IDF — rare term gets better score (more negative)
+    SELECT body <@> '양자컴퓨터' INTO score_rare FROM docs
+    WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '양자컴퓨터')
+    ORDER BY body <@> '양자컴퓨터' LIMIT 1;
+
+    SELECT body <@> '경주' INTO score_common FROM docs
+    WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '경주')
+    ORDER BY body <@> '경주' LIMIT 1;
+
+    ASSERT score_rare < score_common,
+        format('Rare term should score better (lower): %s vs %s', score_rare, score_common);
+
+    -- Assert: Length normalization — short doc scores better than long doc
+    SELECT body <@> '경주' INTO score_short FROM docs WHERE id = 1;
+    SELECT body <@> '경주' INTO score_long FROM docs WHERE id = 5;
+    ASSERT score_short < score_long,
+        format('Short doc should score better: %s vs %s', score_short, score_long);
+
+    -- Assert: Korean morphology works through BM25
+    PERFORM id FROM docs
+    WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '건축');
+    ASSERT FOUND,
+        '건축 must match 건축된 through BM25 + Kiwi lemmatization';
+
+    -- Assert: BM25 differentiates scores (unlike ts_rank)
+    SELECT count(DISTINCT body <@> '경주') INTO cnt_bm25_distinct FROM docs
+    WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '경주');
+
+    SELECT count(DISTINCT ts_rank(to_tsvector('korean', body), to_tsquery('korean', '경주')))
+    INTO cnt_tsrank_distinct FROM docs
+    WHERE to_tsvector('korean', body) @@ to_tsquery('korean', '경주');
+
+    ASSERT cnt_bm25_distinct > cnt_tsrank_distinct,
+        format('BM25 should have more distinct scores than ts_rank: %s vs %s',
+               cnt_bm25_distinct, cnt_tsrank_distinct);
+
+    RAISE NOTICE 'ALL BM25 ASSERTIONS PASSED';
+END;
+$$;
+NOTICE:  ALL BM25 ASSERTIONS PASSED
+-- Cleanup
+DROP TABLE IF EXISTS docs;
+DROP EXTENSION pg_textsearch;
+DROP EXTENSION pg_kiwi;

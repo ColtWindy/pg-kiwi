@@ -1,0 +1,172 @@
+-- pg_kiwi lemmatization tests
+--
+-- Tests the core BM25 quality factor: normalization of Korean
+-- inflected forms to their base (lemma) forms.
+--
+-- Without lemmatization, BM25 cannot match "먹었다" against a query
+-- for "먹다" because they are different strings. Kiwi's lemmatization
+-- normalizes all conjugated forms to the same stem, making Korean
+-- BM25 retrieval actually work.
+
+DROP EXTENSION IF EXISTS pg_kiwi CASCADE;
+CREATE EXTENSION pg_kiwi;
+SET pg_kiwi.pos_filter = true;
+
+-- ============================================================
+-- TEST 1: 동사 활용형 → 동일 어간 (Verb conjugations → same stem)
+--
+-- Korean verbs conjugate for tense, aspect, mood, politeness.
+-- All forms of "가다" (to go) must normalize to "가".
+-- ============================================================
+
+-- 1a. 시제 변화 (Tense variation)
+SELECT 'T1a: verb tense normalization' AS test,
+       to_tsvector('korean', '간다') AS present,
+       to_tsvector('korean', '갔다') AS past,
+       to_tsvector('korean', '가겠다') AS future;
+
+-- 1b. 높임법 변화 (Politeness levels)
+SELECT 'T1b: verb politeness normalization' AS test,
+       to_tsvector('korean', '먹는다') AS plain,
+       to_tsvector('korean', '먹습니다') AS formal,
+       to_tsvector('korean', '먹어요') AS polite;
+
+-- 1c. 연결형 (Connective endings)
+SELECT 'T1c: verb connective normalization' AS test,
+       to_tsvector('korean', '먹고') AS conjunctive,
+       to_tsvector('korean', '먹으면') AS conditional,
+       to_tsvector('korean', '먹어서') AS causal;
+
+-- 1d. Cross-form search: all conjugations match "먹" query
+SELECT 'T1d: all verb forms match base query' AS test,
+       to_tsvector('korean', '먹는다') @@ to_tsquery('korean', '먹') AS plain,
+       to_tsvector('korean', '먹었다') @@ to_tsquery('korean', '먹') AS past,
+       to_tsvector('korean', '먹겠다') @@ to_tsquery('korean', '먹') AS future,
+       to_tsvector('korean', '먹습니다') @@ to_tsquery('korean', '먹') AS formal;
+
+-- ============================================================
+-- TEST 2: 형용사 활용형 → 동일 어간 (Adjective conjugations)
+--
+-- "아름답다" → "아름답" across all forms
+-- ============================================================
+
+SELECT 'T2a: adjective normalization' AS test,
+       to_tsvector('korean', '아름답다') AS base,
+       to_tsvector('korean', '아름다운') AS modifier,
+       to_tsvector('korean', '아름답고') AS conjunctive,
+       to_tsvector('korean', '아름다워서') AS causal;
+
+SELECT 'T2b: adjective forms match base query' AS test,
+       to_tsvector('korean', '아름다운 풍경') @@ to_tsquery('korean', '아름답') AS modifier,
+       to_tsvector('korean', '아름다워서 좋다') @@ to_tsquery('korean', '아름답') AS causal;
+
+-- ============================================================
+-- TEST 3: 교착어 매칭 (Agglutination handling)
+--
+-- THE core use case for Korean FTS:
+-- "서울에서", "서울로", "서울의", "서울은" all contain "서울"
+-- Without morphological analysis, these are 4 different tokens.
+-- ============================================================
+
+-- 3a. Same noun with different particles → all match
+SELECT 'T3a: agglutination matching' AS test,
+       to_tsvector('korean', '서울에서 출발한다') @@ to_tsquery('korean', '서울') AS locative,
+       to_tsvector('korean', '서울로 간다') @@ to_tsquery('korean', '서울') AS directional,
+       to_tsvector('korean', '서울의 인구') @@ to_tsquery('korean', '서울') AS possessive,
+       to_tsvector('korean', '서울은 수도이다') @@ to_tsquery('korean', '서울') AS topic;
+
+-- 3b. Object case particles
+SELECT 'T3b: object case matching' AS test,
+       to_tsvector('korean', '책을 읽었다') @@ to_tsquery('korean', '책') AS accusative,
+       to_tsvector('korean', '책이 있다') @@ to_tsquery('korean', '책') AS nominative,
+       to_tsvector('korean', '책에서 발견했다') @@ to_tsquery('korean', '책') AS locative;
+
+-- 3c. Named entity with particles
+SELECT 'T3c: named entity agglutination' AS test,
+       to_tsvector('korean', '불국사는 경주에 있다') @@ to_tsquery('korean', '불국사') AS topic,
+       to_tsvector('korean', '불국사를 방문했다') @@ to_tsquery('korean', '불국사') AS object,
+       to_tsvector('korean', '불국사에서 출발했다') @@ to_tsquery('korean', '불국사') AS from;
+
+-- ============================================================
+-- TEST 4: 복합명사 분해 (Compound noun decomposition)
+--
+-- Kiwi's differentiator vs MeCab-ko:
+-- "등산로이다" → 등산로 + 이 (Kiwi)
+-- vs 등 + 산로 + 이 + 다 (MeCab-ko over-segments)
+-- ============================================================
+
+-- 4a. Compound noun preserved
+SELECT 'T4a: compound noun preserved' AS test,
+       to_tsvector('korean', '등산로이다') AS vec,
+       to_tsvector('korean', '등산로이다') @@ to_tsquery('korean', '등산로') AS matches_compound;
+
+-- 4b. Domain compound nouns
+SELECT 'T4b: domain compounds' AS test,
+       to_tsvector('korean', '대학교에 다닌다') @@ to_tsquery('korean', '대학교') AS university,
+       to_tsvector('korean', '도서관에서 공부한다') @@ to_tsquery('korean', '도서관') AS library;
+
+-- ============================================================
+-- TEST 5: 불규칙 활용 (Irregular conjugation)
+--
+-- Korean has multiple irregular verb/adjective conjugation classes.
+-- Lemmatization must handle these correctly.
+-- ============================================================
+
+-- 5a. ㄷ 불규칙 (ㄷ-irregular): 듣다 → 들어, 들으면
+SELECT 'T5a: d-irregular' AS test,
+       to_tsvector('korean', '음악을 듣는다') AS present,
+       to_tsvector('korean', '음악을 들었다') AS past;
+
+-- 5b. ㅂ 불규칙 (ㅂ-irregular): 돕다 → 도와, 도우면
+SELECT 'T5b: b-irregular' AS test,
+       to_tsvector('korean', '친구를 돕는다') AS present,
+       to_tsvector('korean', '친구를 도왔다') AS past;
+
+-- 5c. ㅎ 불규칙 (ㅎ-irregular): 빨갛다 → 빨간, 빨개서
+SELECT 'T5c: h-irregular' AS test,
+       to_tsvector('korean', '빨갛다') AS base,
+       to_tsvector('korean', '빨간 사과') AS modifier;
+
+-- ============================================================
+-- TEST 6: 피동/사동 (Passive/Causative)
+-- ============================================================
+
+SELECT 'T6: passive/causative' AS test,
+       to_tsvector('korean', '문이 열렸다') AS passive_vec,
+       to_tsvector('korean', '문을 열었다') AS active_vec;
+
+-- ============================================================
+-- ASSERTIONS
+-- ============================================================
+
+DO $$
+DECLARE
+    v1 tsvector;
+    v2 tsvector;
+BEGIN
+    SET pg_kiwi.pos_filter = true;
+
+    -- Assert: all tense forms of "가다" produce the same tsvector content
+    v1 := to_tsvector('korean', '간다');
+    v2 := to_tsvector('korean', '갔다');
+    ASSERT v1 = v2,
+        format('Present and past of 가다 must match: %s vs %s', v1, v2);
+
+    -- Assert: agglutination - noun + any particle matches base query
+    ASSERT to_tsvector('korean', '서울에서 출발') @@ '서울'::tsquery,
+        '서울에서 must match query 서울';
+    ASSERT to_tsvector('korean', '서울로 이동') @@ '서울'::tsquery,
+        '서울로 must match query 서울';
+    ASSERT to_tsvector('korean', '서울의 날씨') @@ '서울'::tsquery,
+        '서울의 must match query 서울';
+
+    -- Assert: compound noun not over-segmented
+    ASSERT to_tsvector('korean', '등산로이다') @@ '등산로'::tsquery,
+        '등산로이다 must match query 등산로';
+
+    RAISE NOTICE 'ALL LEMMATIZATION ASSERTIONS PASSED';
+END;
+$$;
+
+-- Cleanup
+DROP EXTENSION pg_kiwi;
