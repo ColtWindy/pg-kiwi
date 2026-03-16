@@ -18,7 +18,7 @@ DROP EXTENSION IF EXISTS pg_textsearch CASCADE;
 NOTICE:  extension "pg_textsearch" does not exist, skipping
 CREATE EXTENSION pg_kiwi;
 CREATE EXTENSION pg_textsearch;
-WARNING:  pg_textsearch v0.5.1 is a prerelease. Do not use in production.
+WARNING:  pg_textsearch v0.6.1 is a prerelease. Do not use in production.
 SET pg_kiwi.pos_filter = true;
 -- ============================================================
 -- Setup: document collection designed for BM25 testing
@@ -55,7 +55,7 @@ CREATE INDEX idx_docs_bm25 ON docs USING bm25(body)
 NOTICE:  BM25 index build started for relation idx_docs_bm25
 NOTICE:  Using text search configuration: public.korean
 NOTICE:  Using index options: k1=1.20, b=0.75
-NOTICE:  BM25 index build completed: 8 documents, avg_length=9.75, text_config='public.korean' (k1=1.20, b=0.75)
+NOTICE:  BM25 index build completed: 8 documents, avg_length=9.75
 -- ============================================================
 -- TEST 1: BM25 인덱스 기본 동작 (BM25 index basics)
 -- ============================================================

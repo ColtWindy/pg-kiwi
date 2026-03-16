@@ -28,7 +28,7 @@ RUN sed -i 's/with_llvm.*=.*yes/with_llvm = no/' \
         /usr/local/lib/postgresql/pgxs/src/Makefile.global
 
 # Build pg_textsearch (BM25 index support)
-RUN git clone --branch v0.5.1 --depth 1 https://github.com/timescale/pg_textsearch /tmp/pg_textsearch && \
+RUN git clone --branch v0.6.1 --depth 1 https://github.com/timescale/pg_textsearch /tmp/pg_textsearch && \
     cd /tmp/pg_textsearch && \
     make && make install
 
@@ -42,6 +42,9 @@ RUN cd /tmp/pg_kiwi && make && make install
 FROM postgres:18-alpine AS runtime
 
 RUN apk add --no-cache libstdc++ libgcc
+
+# pg_textsearch v0.6+ requires shared_preload_libraries
+RUN echo "shared_preload_libraries = 'pg_textsearch'" >> /usr/local/share/postgresql/postgresql.conf.sample
 
 # Kiwi shared library
 COPY --from=builder /usr/local/lib/libkiwi* /usr/local/lib/

@@ -57,7 +57,7 @@ ORDER BY rank DESC;
 
 ### 4. BM25 랭킹 (선택)
 
-Docker 이미지에 [pg_textsearch](https://github.com/timescale/pg_textsearch) v0.5.1 (프리릴리스)이 포함되어 있습니다.
+Docker 이미지에 [pg_textsearch](https://github.com/timescale/pg_textsearch) v0.6.1이 포함되어 있습니다.
 
 ```sql
 CREATE EXTENSION pg_textsearch;
@@ -71,7 +71,7 @@ ORDER BY content <@> '불국사'
 LIMIT 10;
 ```
 
-> pg_textsearch는 PostgreSQL 17/18만 지원하며 v1.0 미출시 상태입니다. 제약사항은 [pg_textsearch repo](https://github.com/timescale/pg_textsearch)를 참고하세요.
+> pg_textsearch는 PostgreSQL 17/18만 지원하며 v1.0 미출시 상태입니다. v0.6+는 `shared_preload_libraries`에 등록이 필요합니다 (Docker 이미지에는 이미 설정됨). 제약사항은 [pg_textsearch repo](https://github.com/timescale/pg_textsearch)를 참고하세요.
 
 ## 설정
 

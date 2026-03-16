@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.1.0] - 2026-03-16
+
+### 변경
+- pg_textsearch v0.5.1 → v0.6.1 업데이트
+- Docker 이미지에 `shared_preload_libraries = 'pg_textsearch'` 설정 추가 (v0.6+ 필수)
+
+### 업그레이드 (1.0 → 1.1.0)
+
+pg_kiwi 파서 자체는 변경 없음. BM25(pg_textsearch)를 사용하지 않는다면 이미지만 교체하면 됩니다.
+
+BM25를 사용 중인 경우:
+
+```bash
+# 1. docker-compose.yml에 command 추가 (커스텀 command를 쓰는 경우만)
+command: postgres -c shared_preload_libraries=pg_textsearch
+
+# 2. 컨테이너 재시작
+docker compose down && docker compose up -d
+
+# 3. 기존 BM25 인덱스 재생성
+psql -c "REINDEX INDEX idx_your_bm25;"
+```
+
 ## [1.0] - 2026-02-20
 
 ### 추가
